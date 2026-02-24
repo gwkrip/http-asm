@@ -10,7 +10,7 @@ SC_L  equ 50
 SC_SO equ 54
 SC_EX equ 60
 AF    equ 2
-ST    equ 1
+SKT   equ 1
 TCP   equ 6
 SOL   equ 1
 RA    equ 2
@@ -19,18 +19,18 @@ ND    equ 1
 DA    equ 9
 QA    equ 12
 FO    equ 23
-SW    equ 1
+SHW   equ 1
 PORT  equ 0x901F
 DBSZ  equ 1472
 
 section .data
-rsp:
+hr:
     db "HTTP/1.1 200 OK",13,10
     db "Content-Type: text/plain",13,10
     db "Content-Length: 2",13,10
     db "Connection: close",13,10,13,10
     db "OK"
-rsl equ $ - rsp
+hrl equ $ - hr
 sa:
     dw AF
     dw PORT
@@ -66,7 +66,7 @@ _start:
     lea  r12, [rel ov]
     mov  rax, SC_SK
     mov  rdi, AF
-    mov  rsi, ST
+    mov  rsi, SKT
     xor  rdx, rdx
     syscall
     test rax, rax
@@ -149,12 +149,12 @@ _start:
 .sr:
     mov  rax, SC_W
     mov  rdi, r14
-    lea  rsi, [rel rsp]
-    mov  rdx, rsl
+    lea  rsi, [rel hr]
+    mov  rdx, hrl
     syscall
     mov  rax, SC_SH
     mov  rdi, r14
-    mov  rsi, SW
+    mov  rsi, SHW
     syscall
     mov  rax, SC_CL
     mov  rdi, r14
