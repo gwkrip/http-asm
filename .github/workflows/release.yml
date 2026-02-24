@@ -39,8 +39,8 @@ jobs:
             src:     arch/arm64/http_server.s
             out:     build/http_server_arm64
             obj:     build/http_server_arm64.o
-            as_cmd:  "aarch64-linux-musl-as"
-            ld_cmd:  "aarch64-linux-musl-ld --static --strip-all"
+            as_cmd:  "aarch64-linux-gnu-as"
+            ld_cmd:  "aarch64-linux-gnu-ld --static --strip-all"
             elf_chk: "ELF 64-bit LSB executable, ARM aarch64"
 
     outputs:
@@ -74,13 +74,11 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            musl-tools \
             binutils-aarch64-linux-gnu \
-            gcc-aarch64-linux-gnu \
             qemu-user-static \
             file
-          aarch64-linux-musl-as --version | head -1
-          aarch64-linux-musl-ld --version | head -1
+          aarch64-linux-gnu-as --version | head -1
+          aarch64-linux-gnu-ld --version | head -1
 
       - name: Assemble
         run: |

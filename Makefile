@@ -17,8 +17,8 @@ x86_64: $(SRC_X86)
 
 arm64: $(SRC_ARM)
 	@mkdir -p build
-	aarch64-linux-musl-as $(SRC_ARM) -o $(OBJ_ARM)
-	aarch64-linux-musl-ld --static $(OBJ_ARM) -o $(TARGET_ARM)
+	aarch64-linux-gnu-as $(SRC_ARM) -o $(OBJ_ARM)
+	aarch64-linux-gnu-ld --static $(OBJ_ARM) -o $(TARGET_ARM)
 	@echo "✅  arm64  → $(TARGET_ARM) ($$(wc -c < $(TARGET_ARM)) bytes)"
 
 clean:
