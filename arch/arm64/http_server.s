@@ -4,7 +4,7 @@ SC_R  = 63
 SC_W  = 64
 SC_CL = 57
 SC_SK = 198
-SC_AC = 202
+SC_AC = 242
 SC_SH = 210
 SC_B  = 200
 SC_L  = 201
@@ -123,6 +123,7 @@ _start:
     mov  x0,  x19
     mov  x1,  xzr
     mov  x2,  xzr
+    mov  x3,  xzr
     svc  #0
     tbnz x0,  63, .al
     mov  x21, x0
