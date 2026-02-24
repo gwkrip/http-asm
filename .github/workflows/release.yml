@@ -1,0 +1,329 @@
+
+name: Release Build
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (contoh: v1.0.0)"
+        required: true
+        default: "v0.0.0-dev"
+
+permissions:
+  contents: write
+
+env:
+  BINARY_NAME: http_server
+  ASM_SRC:     http_server.asm
+
+jobs:
+  build:
+    name: Build — x86-64 Linux
+    runs-on: ubuntu-latest
+
+    outputs:
+      version:     ${{ steps.meta.outputs.version }}
+      binary_size: ${{ steps.meta.outputs.binary_size }}
+      sha256:      ${{ steps.meta.outputs.sha256 }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install NASM + binutils
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            nasm \
+            binutils \
+            file
+          echo "── Tool versions ──────────────────────────"
+          nasm --version
+          ld --version | head -1
+          echo "───────────────────────────────────────────"
+
+      - name: Assemble (NASM → ELF object)
+        run: |
+          nasm -f elf64 \
+               -w+all \
+               -o ${{ env.BINARY_NAME }}.o \
+               ${{ env.ASM_SRC }}
+
+      - name: Link (ELF object → executable)
+        run: |
+          ld \
+            --strip-all \
+            -o ${{ env.BINARY_NAME }} \
+            ${{ env.BINARY_NAME }}.o
+
+      - name: Verify binary
+        run: |
+          echo "── ELF info ───────────────────────────────"
+          file ${{ env.BINARY_NAME }}
+          echo ""
+          echo "── Section sizes ──────────────────────────"
+          size ${{ env.BINARY_NAME }}
+          echo ""
+          echo "── Binary size ────────────────────────────"
+          ls -lh ${{ env.BINARY_NAME }}
+          echo "───────────────────────────────────────────"
+
+          file ${{ env.BINARY_NAME }} | grep -q "ELF 64-bit LSB executable" \
+            || (echo "❌ Bukan ELF64 executable!" && exit 1)
+          echo "✅ ELF64 executable valid"
+
+      - name: Smoke test — all HTTP methods
+        run: |
+          ./${{ env.BINARY_NAME }} &
+          SERVER_PID=$!
+          echo "Server PID: $SERVER_PID"
+
+          for i in $(seq 1 6); do
+            sleep 0.5
+            if curl -sf -X GET http://localhost:8080/ > /dev/null 2>&1; then
+              echo "✅ Server ready setelah $((i * 500))ms"
+              break
+            fi
+            if [ $i -eq 6 ]; then
+              echo "❌ Server tidak ready dalam 3 detik"
+              kill $SERVER_PID 2>/dev/null
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "── Testing semua HTTP methods ─────────────"
+
+          FAILED=0
+
+          test_method() {
+            local METHOD=$1
+            local RESPONSE
+            RESPONSE=$(curl -sf -X "$METHOD" http://localhost:8080/ 2>/dev/null)
+            if [ "$RESPONSE" = "OK" ]; then
+              echo "  ✅ $METHOD → OK"
+            else
+              echo "  ❌ $METHOD → '$RESPONSE' (expected 'OK')"
+              FAILED=$((FAILED + 1))
+            fi
+          }
+
+          test_method GET
+          test_method POST
+          test_method PUT
+          test_method DELETE
+          test_method PATCH
+          test_method OPTIONS
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X HEAD http://localhost:8080/)
+          if [ "$STATUS" = "200" ]; then
+            echo "  ✅ HEAD → 200"
+          else
+            echo "  ❌ HEAD → $STATUS (expected 200)"
+            FAILED=$((FAILED + 1))
+          fi
+
+          echo ""
+          kill $SERVER_PID 2>/dev/null
+          wait $SERVER_PID 2>/dev/null || true
+
+          if [ $FAILED -gt 0 ]; then
+            echo "❌ $FAILED method(s) gagal!"
+            exit 1
+          fi
+          echo "✅ Semua method passed"
+
+      - name: Collect metadata
+        id: meta
+        run: |
+          VERSION=${{ steps.version.outputs.tag }}
+          BINARY_SIZE=$(wc -c < ${{ env.BINARY_NAME }})
+          SHA256=$(sha256sum ${{ env.BINARY_NAME }} | cut -d' ' -f1)
+
+          echo "version=$VERSION"         >> $GITHUB_OUTPUT
+          echo "binary_size=$BINARY_SIZE" >> $GITHUB_OUTPUT
+          echo "sha256=$SHA256"           >> $GITHUB_OUTPUT
+
+          echo "── Metadata ────────────────────────────────"
+          echo "  Version     : $VERSION"
+          echo "  Binary size : $BINARY_SIZE bytes"
+          echo "  SHA256      : $SHA256"
+          echo "────────────────────────────────────────────"
+
+      - name: Generate SHA256SUMS
+        run: |
+          sha256sum ${{ env.BINARY_NAME }} ${{ env.ASM_SRC }} > SHA256SUMS
+          echo "── SHA256SUMS ──────────────────────────────"
+          cat SHA256SUMS
+          echo "────────────────────────────────────────────"
+
+      - name: Generate release README
+        run: |
+          VERSION=${{ steps.version.outputs.tag }}
+          BINARY_SIZE=${{ steps.meta.outputs.binary_size }}
+          SHA256=${{ steps.meta.outputs.sha256 }}
+
+          cat > RELEASE_README.md << EOF
+
+          Ultra-fast, zero-allocation HTTP server — x86-64 Linux Assembly.
+
+          - **Binary size**: ${BINARY_SIZE} bytes
+          - **Allocation**: zero (no BSS, no heap, no mmap at runtime)
+          - **TCP opts**: NODELAY + QUICKACK + DEFER_ACCEPT + REUSEPORT + FASTOPEN
+          - **Syscalls/request**: 7 (accept → nodelay → quickack → read → write → shutdown → close)
+          - **Architecture**: x86-64 Linux (ELF64)
+
+          \`\`\`bash
+          chmod +x http_server
+          ./http_server
+
+          curl -X GET    http://localhost:8080/
+          curl -X POST   http://localhost:8080/ -d "x=1"
+          curl -X DELETE http://localhost:8080/item
+          \`\`\`
+
+          \`\`\`
+          SHA256: ${SHA256}
+          \`\`\`
+          EOF
+
+      - name: Package release archive
+        run: |
+          VERSION=${{ steps.version.outputs.tag }}
+          ARCHIVE="${{ env.BINARY_NAME }}-${VERSION}-linux-x86_64.tar.gz"
+
+          tar -czf "$ARCHIVE" \
+            ${{ env.BINARY_NAME }} \
+            ${{ env.ASM_SRC }} \
+            SHA256SUMS \
+            RELEASE_README.md \
+            Makefile
+
+          echo "ARCHIVE_NAME=$ARCHIVE" >> $GITHUB_ENV
+          echo "── Archive ─────────────────────────────────"
+          ls -lh "$ARCHIVE"
+          tar -tzf "$ARCHIVE"
+          echo "────────────────────────────────────────────"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ steps.version.outputs.tag }}-linux-x86_64
+          path: |
+            ${{ env.BINARY_NAME }}
+            ${{ env.ASM_SRC }}
+            SHA256SUMS
+            RELEASE_README.md
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION=${{ steps.version.outputs.tag }}
+          BINARY_SIZE=${{ steps.meta.outputs.binary_size }}
+          SHA256=${{ steps.meta.outputs.sha256 }}
+
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -1)
+
+          if [ -n "$PREV_TAG" ]; then
+            LOG_RANGE="${PREV_TAG}..HEAD"
+            echo "Changelog dari $PREV_TAG → $VERSION"
+          else
+            LOG_RANGE="HEAD"
+            echo "Changelog: initial release"
+          fi
+
+          cat > /tmp/changelog.md << CHANGELOG_EOF
+
+          Ultra-fast, zero-allocation HTTP server — pure x86-64 Linux Assembly.
+
+          | Property | Value |
+          |---|---|
+          | Architecture | x86-64 Linux (ELF64) |
+          | Binary size | ${BINARY_SIZE} bytes |
+          | Allocation | zero (no BSS, no heap) |
+          | TCP options | NODELAY · QUICKACK · DEFER_ACCEPT · REUSEPORT · FASTOPEN |
+          | Syscalls/req | 7 |
+
+          | File | Keterangan |
+          |---|---|
+          | \`http_server\` | ELF binary, stripped |
+          | \`http_server.asm\` | Source code (NASM) |
+          | \`*.tar.gz\` | Archive lengkap (binary + source + Makefile) |
+          | \`SHA256SUMS\` | Checksum semua file |
+
+          \`\`\`
+          ${SHA256}  http_server
+          \`\`\`
+
+          \`\`\`bash
+          chmod +x http_server && ./http_server
+          curl http://localhost:8080/
+          \`\`\`
+
+          CHANGELOG_EOF
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "### 📝 Changes since ${PREV_TAG}" >> /tmp/changelog.md
+            git log "$LOG_RANGE" \
+              --pretty=format:"- %s (%h)" \
+              --no-merges \
+              >> /tmp/changelog.md || true
+          fi
+
+          echo "changelog_file=/tmp/changelog.md" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ steps.version.outputs.tag }}
+          name:       "http_server ${{ steps.version.outputs.tag }}"
+          body_path:  ${{ steps.changelog.outputs.changelog_file }}
+          draft:      false
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
+          files: |
+            ${{ env.BINARY_NAME }}
+            ${{ env.ASM_SRC }}
+            SHA256SUMS
+            ${{ env.ARCHIVE_NAME }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Write job summary
+        run: |
+          VERSION=${{ steps.version.outputs.tag }}
+          BINARY_SIZE=${{ steps.meta.outputs.binary_size }}
+          SHA256=${{ steps.meta.outputs.sha256 }}
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+
+          | | |
+          |---|---|
+          | **Version** | \`$VERSION\` |
+          | **Binary size** | $BINARY_SIZE bytes |
+          | **SHA256** | \`$SHA256\` |
+          | **Platform** | x86-64 Linux ELF64 |
+
+          - \`http_server\` — ELF binary stripped
+          - \`http_server.asm\` — NASM source
+          - \`http_server-${VERSION}-linux-x86_64.tar.gz\` — archive
+          - \`SHA256SUMS\` — checksums
+
+          ✅ GET · POST · PUT · DELETE · PATCH · HEAD · OPTIONS
+          EOF
