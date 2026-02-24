@@ -1,163 +1,192 @@
 bits 64
-SYS_READ        equ 0
-SYS_WRITE       equ 1
-SYS_CLOSE       equ 3
-SYS_SOCKET      equ 41
-SYS_ACCEPT      equ 43
-SYS_SHUTDOWN    equ 48
-SYS_BIND        equ 49
-SYS_LISTEN      equ 50
-SYS_SETSOCKOPT  equ 54
-SYS_EXIT        equ 60
-AF_INET         equ 2
-SOCK_STREAM     equ 1
-IPPROTO_TCP     equ 6
-SOL_SOCKET      equ 1
-SO_REUSEADDR    equ 2
-SO_REUSEPORT    equ 15
-TCP_NODELAY     equ 1
-TCP_DEFER_ACCEPT equ 9
-TCP_QUICKACK    equ 12
-TCP_FASTOPEN    equ 23
-SHUT_WR         equ 1
-INADDR_ANY      equ 0
-PORT            equ 0x901F
-DRAIN_BUF_SIZE  equ 1472
+SC_R  equ 0
+SC_W  equ 1
+SC_CL equ 3
+SC_SK equ 41
+SC_AC equ 43
+SC_SH equ 48
+SC_B  equ 49
+SC_L  equ 50
+SC_SO equ 54
+SC_EX equ 60
+AF    equ 2
+ST    equ 1
+TCP   equ 6
+SOL   equ 1
+RA    equ 2
+RP    equ 15
+ND    equ 1
+DA    equ 9
+QA    equ 12
+FO    equ 23
+SW    equ 1
+PORT  equ 0x901F
+DBSZ  equ 1472
+
 section .data
-http_response:
-    db "HTTP/1.1 200 OK", 13, 10
-    db "Content-Type: text/plain", 13, 10
-    db "Content-Length: 2", 13, 10
-    db "Connection: close", 13, 10
-    db 13, 10
+rsp:
+    db "HTTP/1.1 200 OK",13,10
+    db "Content-Type: text/plain",13,10
+    db "Content-Length: 2",13,10
+    db "Connection: close",13,10,13,10
     db "OK"
-http_response_len equ $ - http_response
-sockaddr:
-    dw AF_INET
+rsl equ $ - rsp
+sa:
+    dw AF
     dw PORT
-    dd INADDR_ANY
+    dd 0
     dq 0
-optval  dd 1
-msg_start:
-    db "[*] http_server :8080 | zero-alloc | ultra-fast", 10
-    db "    opts: NODELAY QUICKACK DEFER_ACCEPT REUSEPORT FASTOPEN", 10
-msg_start_len equ $ - msg_start
-msg_fatal:
-    db "[-] fatal: startup failed", 10
-msg_fatal_len equ $ - msg_fatal
+ov  dd 1
+ms:
+    db "[*] http_server :8080 | zero-alloc | ultra-fast",10
+    db "    opts: NODELAY QUICKACK DEFER_ACCEPT REUSEPORT FASTOPEN",10
+msl equ $ - ms
+mf:
+    db "[-] fatal: startup failed",10
+mfl equ $ - mf
+mbf:
+    db "[-] fatal: bind failed (port in use?)",10
+mbfl equ $ - mbf
+mlf:
+    db "[-] fatal: listen failed",10
+mlfl equ $ - mlf
+
+section .bss
+db_: resb DBSZ
+
 section .text
 global _start
 _start:
-    mov     rax, SYS_WRITE
-    mov     rdi, 1
-    mov     rsi, msg_start
-    mov     rdx, msg_start_len
+    mov  rax, SC_W
+    mov  rdi, 1
+    lea  rsi, [rel ms]
+    mov  rdx, msl
     syscall
-    mov     r12, optval
-    mov     rax, SYS_SOCKET
-    mov     rdi, AF_INET
-    mov     rsi, SOCK_STREAM
-    xor     rdx, rdx
+    xor  r15, r15
+    lea  r12, [rel ov]
+    mov  rax, SC_SK
+    mov  rdi, AF
+    mov  rsi, ST
+    xor  rdx, rdx
     syscall
-    test    rax, rax
-    js      .fatal
-    mov     r15, rax
-    mov     rax, SYS_SETSOCKOPT
-    mov     rdi, r15
-    mov     rsi, SOL_SOCKET
-    mov     rdx, SO_REUSEADDR
-    mov     r10, r12
-    mov     r8,  4
+    test rax, rax
+    js   .ft
+    mov  r15, rax
+    mov  rax, SC_SO
+    mov  rdi, r15
+    mov  rsi, SOL
+    mov  rdx, RA
+    mov  r10, r12
+    mov  r8,  4
     syscall
-    mov     rax, SYS_SETSOCKOPT
-    mov     rdi, r15
-    mov     rsi, SOL_SOCKET
-    mov     rdx, SO_REUSEPORT
-    mov     r10, r12
-    mov     r8,  4
+    mov  rax, SC_SO
+    mov  rdi, r15
+    mov  rsi, SOL
+    mov  rdx, RP
+    mov  r10, r12
+    mov  r8,  4
     syscall
-    mov     rax, SYS_SETSOCKOPT
-    mov     rdi, r15
-    mov     rsi, IPPROTO_TCP
-    mov     rdx, TCP_DEFER_ACCEPT
-    mov     r10, r12
-    mov     r8,  4
+    mov  rax, SC_SO
+    mov  rdi, r15
+    mov  rsi, TCP
+    mov  rdx, DA
+    mov  r10, r12
+    mov  r8,  4
     syscall
-    mov     rax, SYS_SETSOCKOPT
-    mov     rdi, r15
-    mov     rsi, IPPROTO_TCP
-    mov     rdx, TCP_FASTOPEN
-    mov     r10, r12
-    mov     r8,  4
+    mov  rax, SC_SO
+    mov  rdi, r15
+    mov  rsi, TCP
+    mov  rdx, FO
+    mov  r10, r12
+    mov  r8,  4
     syscall
-    mov     rax, SYS_BIND
-    mov     rdi, r15
-    mov     rsi, sockaddr
-    mov     rdx, 16
+    mov  rax, SC_B
+    mov  rdi, r15
+    lea  rsi, [rel sa]
+    mov  rdx, 16
     syscall
-    test    rax, rax
-    jnz     .fatal
-    mov     rax, SYS_LISTEN
-    mov     rdi, r15
-    mov     rsi, 4096
+    test rax, rax
+    jnz  .bf
+    mov  rax, SC_L
+    mov  rdi, r15
+    mov  rsi, 4096
     syscall
-    test    rax, rax
-    jnz     .fatal
-    sub     rsp, DRAIN_BUF_SIZE
-    mov     r13, rsp
-.accept_loop:
-    mov     rax, SYS_ACCEPT
-    mov     rdi, r15
-    xor     rsi, rsi
-    xor     rdx, rdx
+    test rax, rax
+    jnz  .lf
+.al:
+    mov  rax, SC_AC
+    mov  rdi, r15
+    xor  rsi, rsi
+    xor  rdx, rdx
     syscall
-    test    rax, rax
-    js      .accept_loop
-    mov     r14, rax
-    mov     rax, SYS_SETSOCKOPT
-    mov     rdi, r14
-    mov     rsi, IPPROTO_TCP
-    mov     rdx, TCP_NODELAY
-    mov     r10, r12
-    mov     r8,  4
+    test rax, rax
+    js   .al
+    mov  r14, rax
+    mov  rax, SC_SO
+    mov  rdi, r14
+    mov  rsi, TCP
+    mov  rdx, ND
+    mov  r10, r12
+    mov  r8,  4
     syscall
-    mov     rax, SYS_SETSOCKOPT
-    mov     rdi, r14
-    mov     rsi, IPPROTO_TCP
-    mov     rdx, TCP_QUICKACK
-    mov     r10, r12
-    mov     r8,  4
+    mov  rax, SC_SO
+    mov  rdi, r14
+    mov  rsi, TCP
+    mov  rdx, QA
+    mov  r10, r12
+    mov  r8,  4
     syscall
-    mov     rax, SYS_READ
-    mov     rdi, r14
-    mov     rsi, r13
-    mov     rdx, DRAIN_BUF_SIZE
+.dl:
+    mov  rax, SC_R
+    mov  rdi, r14
+    lea  rsi, [rel db_]
+    mov  rdx, DBSZ
     syscall
-    mov     rax, SYS_WRITE
-    mov     rdi, r14
-    mov     rsi, http_response
-    mov     rdx, http_response_len
+    test rax, rax
+    jle  .sr
+    cmp  rax, DBSZ
+    je   .dl
+.sr:
+    mov  rax, SC_W
+    mov  rdi, r14
+    lea  rsi, [rel rsp]
+    mov  rdx, rsl
     syscall
-    mov     rax, SYS_SHUTDOWN
-    mov     rdi, r14
-    mov     rsi, SHUT_WR
+    mov  rax, SC_SH
+    mov  rdi, r14
+    mov  rsi, SW
     syscall
-    mov     rax, SYS_CLOSE
-    mov     rdi, r14
+    mov  rax, SC_CL
+    mov  rdi, r14
     syscall
-    jmp     .accept_loop
-.fatal:
-    mov     rax, SYS_WRITE
-    mov     rdi, 2
-    mov     rsi, msg_fatal
-    mov     rdx, msg_fatal_len
+    jmp  .al
+.bf:
+    mov  rax, SC_W
+    mov  rdi, 2
+    lea  rsi, [rel mbf]
+    mov  rdx, mbfl
     syscall
-    test    r15, r15
-    jz      .exit
-    mov     rax, SYS_CLOSE
-    mov     rdi, r15
+    jmp  .cl
+.lf:
+    mov  rax, SC_W
+    mov  rdi, 2
+    lea  rsi, [rel mlf]
+    mov  rdx, mlfl
     syscall
-.exit:
-    mov     rax, SYS_EXIT
-    mov     rdi, 1
+    jmp  .cl
+.ft:
+    mov  rax, SC_W
+    mov  rdi, 2
+    lea  rsi, [rel mf]
+    mov  rdx, mfl
+    syscall
+.cl:
+    test r15, r15
+    jz   .ex
+    mov  rax, SC_CL
+    mov  rdi, r15
+    syscall
+.ex:
+    mov  rax, SC_EX
+    mov  rdi, 1
     syscall
