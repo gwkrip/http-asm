@@ -1,4 +1,3 @@
-
 name: Release Build
 
 on:
@@ -18,17 +17,34 @@ permissions:
 
 env:
   BINARY_NAME: http_server
-  ASM_SRC:     http_server.asm
 
 jobs:
   build:
-    name: Build — x86-64 Linux
+    name: Build — ${{ matrix.arch }}
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch:    x86_64
+            src:     arch/x86_64/http_server.asm
+            out:     build/http_server_x86_64
+            obj:     build/http_server_x86_64.o
+            as_cmd:  "nasm -f elf64 -w+all"
+            ld_cmd:  "ld --strip-all"
+            elf_chk: "ELF 64-bit LSB executable, x86-64"
+
+          - arch:    arm64
+            src:     arch/arm64/http_server.s
+            out:     build/http_server_arm64
+            obj:     build/http_server_arm64.o
+            as_cmd:  "aarch64-linux-musl-as"
+            ld_cmd:  "aarch64-linux-musl-ld --static --strip-all"
+            elf_chk: "ELF 64-bit LSB executable, ARM aarch64"
+
     outputs:
-      version:     ${{ steps.meta.outputs.version }}
-      binary_size: ${{ steps.meta.outputs.binary_size }}
-      sha256:      ${{ steps.meta.outputs.sha256 }}
+      version: ${{ steps.meta.outputs.version }}
 
     steps:
       - name: Checkout source
@@ -45,246 +61,224 @@ jobs:
             echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Install NASM + binutils
+      - name: Install toolchain (x86_64)
+        if: matrix.arch == 'x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends nasm binutils file
+          nasm --version
+          ld --version | head -1
+
+      - name: Install toolchain (arm64)
+        if: matrix.arch == 'arm64'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            nasm \
-            binutils \
+            musl-tools \
+            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            qemu-user-static \
             file
-          echo "── Tool versions ──────────────────────────"
-          nasm --version
-          ld --version | head -1
-          echo "───────────────────────────────────────────"
+          aarch64-linux-musl-as --version | head -1
+          aarch64-linux-musl-ld --version | head -1
 
-      - name: Assemble (NASM → ELF object)
+      - name: Assemble
         run: |
-          nasm -f elf64 \
-               -w+all \
-               -o ${{ env.BINARY_NAME }}.o \
-               ${{ env.ASM_SRC }}
+          mkdir -p build
+          ${{ matrix.as_cmd }} ${{ matrix.src }} -o ${{ matrix.obj }}
 
-      - name: Link (ELF object → executable)
+      - name: Link
         run: |
-          ld \
-            --strip-all \
-            -o ${{ env.BINARY_NAME }} \
-            ${{ env.BINARY_NAME }}.o
+          ${{ matrix.ld_cmd }} ${{ matrix.obj }} -o ${{ matrix.out }}
 
       - name: Verify binary
         run: |
-          echo "── ELF info ───────────────────────────────"
-          file ${{ env.BINARY_NAME }}
-          echo ""
-          echo "── Section sizes ──────────────────────────"
-          size ${{ env.BINARY_NAME }}
-          echo ""
-          echo "── Binary size ────────────────────────────"
-          ls -lh ${{ env.BINARY_NAME }}
-          echo "───────────────────────────────────────────"
+          file ${{ matrix.out }}
+          size ${{ matrix.out }}
+          ls -lh ${{ matrix.out }}
+          file ${{ matrix.out }} | grep -q "${{ matrix.elf_chk }}" \
+            || (echo "❌ ELF check gagal!" && exit 1)
+          echo "✅ ELF valid: ${{ matrix.arch }}"
 
-          file ${{ env.BINARY_NAME }} | grep -q "ELF 64-bit LSB executable" \
-            || (echo "❌ Bukan ELF64 executable!" && exit 1)
-          echo "✅ ELF64 executable valid"
-
-      - name: Smoke test — all HTTP methods
+      - name: Smoke test (x86_64)
+        if: matrix.arch == 'x86_64'
         run: |
-          ./${{ env.BINARY_NAME }} &
+          ./${{ matrix.out }} &
           SERVER_PID=$!
-          echo "Server PID: $SERVER_PID"
 
           for i in $(seq 1 6); do
             sleep 0.5
-            if curl -sf -X GET http://localhost:8080/ > /dev/null 2>&1; then
-              echo "✅ Server ready setelah $((i * 500))ms"
-              break
-            fi
-            if [ $i -eq 6 ]; then
-              echo "❌ Server tidak ready dalam 3 detik"
-              kill $SERVER_PID 2>/dev/null
-              exit 1
-            fi
+            curl -sf http://localhost:8080/ > /dev/null 2>&1 && break
+            [ $i -eq 6 ] && echo "❌ Server timeout" && kill $SERVER_PID && exit 1
           done
-
-          echo ""
-          echo "── Testing semua HTTP methods ─────────────"
+          echo "✅ Server ready"
 
           FAILED=0
-
-          test_method() {
-            local METHOD=$1
-            local RESPONSE
-            RESPONSE=$(curl -sf -X "$METHOD" http://localhost:8080/ 2>/dev/null)
-            if [ "$RESPONSE" = "OK" ]; then
-              echo "  ✅ $METHOD → OK"
-            else
-              echo "  ❌ $METHOD → '$RESPONSE' (expected 'OK')"
-              FAILED=$((FAILED + 1))
-            fi
-          }
-
-          test_method GET
-          test_method POST
-          test_method PUT
-          test_method DELETE
-          test_method PATCH
-          test_method OPTIONS
+          for METHOD in GET POST PUT DELETE PATCH OPTIONS; do
+            RES=$(curl -sf -X "$METHOD" http://localhost:8080/ 2>/dev/null)
+            [ "$RES" = "OK" ] && echo "  ✅ $METHOD" || { echo "  ❌ $METHOD → '$RES'"; FAILED=$((FAILED+1)); }
+          done
 
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X HEAD http://localhost:8080/)
-          if [ "$STATUS" = "200" ]; then
-            echo "  ✅ HEAD → 200"
-          else
-            echo "  ❌ HEAD → $STATUS (expected 200)"
-            FAILED=$((FAILED + 1))
-          fi
+          [ "$STATUS" = "200" ] && echo "  ✅ HEAD" || { echo "  ❌ HEAD → $STATUS"; FAILED=$((FAILED+1)); }
 
-          echo ""
-          kill $SERVER_PID 2>/dev/null
-          wait $SERVER_PID 2>/dev/null || true
-
-          if [ $FAILED -gt 0 ]; then
-            echo "❌ $FAILED method(s) gagal!"
-            exit 1
-          fi
+          kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true
+          [ $FAILED -gt 0 ] && echo "❌ $FAILED method(s) gagal" && exit 1
           echo "✅ Semua method passed"
+
+      - name: Smoke test (arm64 via qemu)
+        if: matrix.arch == 'arm64'
+        run: |
+          qemu-aarch64-static ${{ matrix.out }} &
+          SERVER_PID=$!
+
+          for i in $(seq 1 6); do
+            sleep 0.5
+            curl -sf http://localhost:8080/ > /dev/null 2>&1 && break
+            [ $i -eq 6 ] && echo "❌ Server timeout" && kill $SERVER_PID && exit 1
+          done
+          echo "✅ Server ready (qemu-aarch64)"
+
+          FAILED=0
+          for METHOD in GET POST PUT DELETE PATCH OPTIONS; do
+            RES=$(curl -sf -X "$METHOD" http://localhost:8080/ 2>/dev/null)
+            [ "$RES" = "OK" ] && echo "  ✅ $METHOD" || { echo "  ❌ $METHOD → '$RES'"; FAILED=$((FAILED+1)); }
+          done
+
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X HEAD http://localhost:8080/)
+          [ "$STATUS" = "200" ] && echo "  ✅ HEAD" || { echo "  ❌ HEAD → $STATUS"; FAILED=$((FAILED+1)); }
+
+          kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null || true
+          [ $FAILED -gt 0 ] && echo "❌ $FAILED method(s) gagal" && exit 1
+          echo "✅ Semua method passed (qemu-aarch64)"
 
       - name: Collect metadata
         id: meta
         run: |
           VERSION=${{ steps.version.outputs.tag }}
-          BINARY_SIZE=$(wc -c < ${{ env.BINARY_NAME }})
-          SHA256=$(sha256sum ${{ env.BINARY_NAME }} | cut -d' ' -f1)
+          BINARY_SIZE=$(wc -c < ${{ matrix.out }})
+          SHA256=$(sha256sum ${{ matrix.out }} | cut -d' ' -f1)
 
           echo "version=$VERSION"         >> $GITHUB_OUTPUT
           echo "binary_size=$BINARY_SIZE" >> $GITHUB_OUTPUT
           echo "sha256=$SHA256"           >> $GITHUB_OUTPUT
 
-          echo "── Metadata ────────────────────────────────"
           echo "  Version     : $VERSION"
+          echo "  Arch        : ${{ matrix.arch }}"
           echo "  Binary size : $BINARY_SIZE bytes"
           echo "  SHA256      : $SHA256"
-          echo "────────────────────────────────────────────"
 
       - name: Generate SHA256SUMS
         run: |
-          sha256sum ${{ env.BINARY_NAME }} ${{ env.ASM_SRC }} > SHA256SUMS
-          echo "── SHA256SUMS ──────────────────────────────"
-          cat SHA256SUMS
-          echo "────────────────────────────────────────────"
+          sha256sum ${{ matrix.out }} ${{ matrix.src }} \
+            > build/SHA256SUMS_${{ matrix.arch }}
+          cat build/SHA256SUMS_${{ matrix.arch }}
 
-      - name: Generate release README
+      - name: Package archive
+        run: |
+          VERSION=${{ steps.version.outputs.tag }}
+          ARCHIVE="http_server-${VERSION}-linux-${{ matrix.arch }}.tar.gz"
+          tar -czf "build/$ARCHIVE" \
+            -C build \
+            $(basename ${{ matrix.out }}) \
+            SHA256SUMS_${{ matrix.arch }} \
+            --transform "s|^|http_server-${VERSION}-linux-${{ matrix.arch }}/|" \
+            && tar -czf "build/$ARCHIVE" \
+              ${{ matrix.out }} \
+              ${{ matrix.src }} \
+              Makefile \
+              build/SHA256SUMS_${{ matrix.arch }}
+          echo "ARCHIVE=build/$ARCHIVE" >> $GITHUB_ENV
+          ls -lh "build/$ARCHIVE"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: http_server-${{ steps.version.outputs.tag }}-linux-${{ matrix.arch }}
+          path: |
+            ${{ matrix.out }}
+            ${{ matrix.src }}
+            build/SHA256SUMS_${{ matrix.arch }}
+            ${{ env.ARCHIVE }}
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Write job summary
         run: |
           VERSION=${{ steps.version.outputs.tag }}
           BINARY_SIZE=${{ steps.meta.outputs.binary_size }}
           SHA256=${{ steps.meta.outputs.sha256 }}
-
-          cat > RELEASE_README.md << EOF
-
-          Ultra-fast, zero-allocation HTTP server — x86-64 Linux Assembly.
-
-          - **Binary size**: ${BINARY_SIZE} bytes
-          - **Allocation**: zero (no BSS, no heap, no mmap at runtime)
-          - **TCP opts**: NODELAY + QUICKACK + DEFER_ACCEPT + REUSEPORT + FASTOPEN
-          - **Syscalls/request**: 7 (accept → nodelay → quickack → read → write → shutdown → close)
-          - **Architecture**: x86-64 Linux (ELF64)
-
-          \`\`\`bash
-          chmod +x http_server
-          ./http_server
-
-          curl -X GET    http://localhost:8080/
-          curl -X POST   http://localhost:8080/ -d "x=1"
-          curl -X DELETE http://localhost:8080/item
-          \`\`\`
-
-          \`\`\`
-          SHA256: ${SHA256}
-          \`\`\`
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ${{ matrix.arch }}
+          | | |
+          |---|---|
+          | **Version** | \`$VERSION\` |
+          | **Arch** | ${{ matrix.arch }} |
+          | **Binary size** | ${BINARY_SIZE} bytes |
+          | **SHA256** | \`${SHA256}\` |
           EOF
 
-      - name: Package release archive
-        run: |
-          VERSION=${{ steps.version.outputs.tag }}
-          ARCHIVE="${{ env.BINARY_NAME }}-${VERSION}-linux-x86_64.tar.gz"
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: build
 
-          tar -czf "$ARCHIVE" \
-            ${{ env.BINARY_NAME }} \
-            ${{ env.ASM_SRC }} \
-            SHA256SUMS \
-            RELEASE_README.md \
-            Makefile
-
-          echo "ARCHIVE_NAME=$ARCHIVE" >> $GITHUB_ENV
-          echo "── Archive ─────────────────────────────────"
-          ls -lh "$ARCHIVE"
-          tar -tzf "$ARCHIVE"
-          echo "────────────────────────────────────────────"
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
         with:
-          name: ${{ env.BINARY_NAME }}-${{ steps.version.outputs.tag }}-linux-x86_64
-          path: |
-            ${{ env.BINARY_NAME }}
-            ${{ env.ASM_SRC }}
-            SHA256SUMS
-            RELEASE_README.md
-          retention-days: 30
-          if-no-files-found: error
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
 
       - name: Generate changelog
         id: changelog
         run: |
           VERSION=${{ steps.version.outputs.tag }}
-          BINARY_SIZE=${{ steps.meta.outputs.binary_size }}
-          SHA256=${{ steps.meta.outputs.sha256 }}
-
           PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${VERSION}$" | head -1)
+          [ -n "$PREV_TAG" ] && LOG_RANGE="${PREV_TAG}..HEAD" || LOG_RANGE="HEAD"
 
-          if [ -n "$PREV_TAG" ]; then
-            LOG_RANGE="${PREV_TAG}..HEAD"
-            echo "Changelog dari $PREV_TAG → $VERSION"
-          else
-            LOG_RANGE="HEAD"
-            echo "Changelog: initial release"
-          fi
-
-          cat > /tmp/changelog.md << CHANGELOG_EOF
-
-          Ultra-fast, zero-allocation HTTP server — pure x86-64 Linux Assembly.
+          cat > /tmp/changelog.md << EOF
+          Ultra-fast, zero-allocation HTTP server — Linux Assembly (x86-64 + ARM64).
 
           | Property | Value |
           |---|---|
-          | Architecture | x86-64 Linux (ELF64) |
-          | Binary size | ${BINARY_SIZE} bytes |
-          | Allocation | zero (no BSS, no heap) |
+          | Architectures | x86-64 · ARM64 (musl static) |
+          | Allocation | zero |
           | TCP options | NODELAY · QUICKACK · DEFER_ACCEPT · REUSEPORT · FASTOPEN |
           | Syscalls/req | 7 |
 
           | File | Keterangan |
           |---|---|
-          | \`http_server\` | ELF binary, stripped |
-          | \`http_server.asm\` | Source code (NASM) |
-          | \`*.tar.gz\` | Archive lengkap (binary + source + Makefile) |
-          | \`SHA256SUMS\` | Checksum semua file |
-
-          \`\`\`
-          ${SHA256}  http_server
-          \`\`\`
+          | \`http_server_x86_64\` | ELF64 binary, stripped |
+          | \`http_server_arm64\` | ELF64 ARM64 binary, static musl |
+          | \`*.tar.gz\` | Archive per arsitektur |
+          | \`SHA256SUMS_*\` | Checksum per arsitektur |
 
           \`\`\`bash
-          chmod +x http_server && ./http_server
+          chmod +x http_server_x86_64 && ./http_server_x86_64
           curl http://localhost:8080/
           \`\`\`
-
-          CHANGELOG_EOF
+          EOF
 
           if [ -n "$PREV_TAG" ]; then
-            echo "### 📝 Changes since ${PREV_TAG}" >> /tmp/changelog.md
+            echo "" >> /tmp/changelog.md
+            echo "### Changes since ${PREV_TAG}" >> /tmp/changelog.md
             git log "$LOG_RANGE" \
               --pretty=format:"- %s (%h)" \
-              --no-merges \
-              >> /tmp/changelog.md || true
+              --no-merges >> /tmp/changelog.md || true
           fi
 
           echo "changelog_file=/tmp/changelog.md" >> $GITHUB_OUTPUT
@@ -297,33 +291,6 @@ jobs:
           body_path:  ${{ steps.changelog.outputs.changelog_file }}
           draft:      false
           prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
-          files: |
-            ${{ env.BINARY_NAME }}
-            ${{ env.ASM_SRC }}
-            SHA256SUMS
-            ${{ env.ARCHIVE_NAME }}
+          files: dist/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Write job summary
-        run: |
-          VERSION=${{ steps.version.outputs.tag }}
-          BINARY_SIZE=${{ steps.meta.outputs.binary_size }}
-          SHA256=${{ steps.meta.outputs.sha256 }}
-
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-
-          | | |
-          |---|---|
-          | **Version** | \`$VERSION\` |
-          | **Binary size** | $BINARY_SIZE bytes |
-          | **SHA256** | \`$SHA256\` |
-          | **Platform** | x86-64 Linux ELF64 |
-
-          - \`http_server\` — ELF binary stripped
-          - \`http_server.asm\` — NASM source
-          - \`http_server-${VERSION}-linux-x86_64.tar.gz\` — archive
-          - \`SHA256SUMS\` — checksums
-
-          ✅ GET · POST · PUT · DELETE · PATCH · HEAD · OPTIONS
-          EOF
